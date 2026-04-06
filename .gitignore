@@ -1,0 +1,12 @@
+node_modules
+dist
+*.local
+.env
+.env.*
+!.env.example
+tsconfig.tsbuildinfo
+
+# Claude Code
+.claude
+.storecode
+CLAUDE.md
