@@ -21,6 +21,10 @@ export function EntityExplorer() {
   tripleLimitRef.current = tripleLimit;
   const traversalRef = useRef(traversal);
   traversalRef.current = traversal;
+  // Keep the latest searched entity in a ref so the traversal-options effect
+  // below can re-run a query for it without listing it as a dependency
+  // (which would cause a duplicate query on every search / node click,
+  // since handleSearch itself updates searchedEntity).
   const searchedEntityRef = useRef(searchedEntity);
   searchedEntityRef.current = searchedEntity;
 
@@ -46,8 +50,11 @@ export function EntityExplorer() {
     }
   }, []);
 
+  // Re-fetch when traversal options change (and once on mount with the
+  // default searchedEntity).
   useEffect(() => {
-    if (searchedEntityRef.current) handleSearch(searchedEntityRef.current);
+    const id = searchedEntityRef.current;
+    if (id) handleSearch(id);
   }, [tripleLimit, traversal, handleSearch]);
 
   const handleNodeClick = useCallback((nodeId: string) => {
