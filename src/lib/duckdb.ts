@@ -145,6 +145,7 @@ export async function queryEntity(entityId: string, limit = 500): Promise<Triple
     SELECT subject, predicate, object, source, object_type
     FROM kg
     WHERE subject = '${escaped}' OR object = '${escaped}'
+       OR subject ILIKE '${escaped}' OR object ILIKE '${escaped}'
     LIMIT ${safeLimit}
   `);
   return result.toArray().map((row: Record<string, unknown>) => ({
@@ -158,12 +159,26 @@ export async function queryEntity(entityId: string, limit = 500): Promise<Triple
 
 export type TraversalMode = 'bfs' | 'dfs';
 
+async function resolveSeedEntities(entityId: string): Promise<string[]> {
+  const conn = await getConnection();
+  const escaped = entityId.replace(/'/g, "''");
+  const result = await conn.query(`
+    SELECT DISTINCT id FROM (
+      SELECT subject AS id FROM kg WHERE subject ILIKE '${escaped}'
+      UNION ALL
+      SELECT object AS id FROM kg WHERE object ILIKE '${escaped}'
+    ) LIMIT 10
+  `);
+  const ids = result.toArray().map((r: Record<string, unknown>) => String(r.id));
+  return ids.length > 0 ? ids : [entityId];
+}
+
 async function fetchNeighbors(entityIds: string[], limit: number): Promise<Triple[]> {
   const conn = await getConnection();
   const escaped = entityIds.map((id) => `'${id.replace(/'/g, "''")}'`).join(',');
   const safeLimit = sanitizeLimit(limit);
   const result = await conn.query(`
-    SELECT subject, predicate, object, source, object_type
+    SELECT DISTINCT subject, predicate, object, source, object_type
     FROM kg
     WHERE subject IN (${escaped}) OR object IN (${escaped})
     LIMIT ${safeLimit}
@@ -182,8 +197,9 @@ async function traverseBFS(
   depth: number,
   limit: number,
 ): Promise<Triple[]> {
+  const seeds = await resolveSeedEntities(entityId);
   const allTriples = new Map<string, Triple>();
-  let frontier = new Set([entityId]);
+  let frontier = new Set(seeds);
   const visited = new Set<string>();
 
   for (let hop = 0; hop < depth; hop++) {
@@ -214,11 +230,11 @@ async function traverseDFS(
   depth: number,
   limit: number,
 ): Promise<Triple[]> {
+  const seeds = await resolveSeedEntities(entityId);
   const allTriples = new Map<string, Triple>();
   const visited = new Set<string>();
 
-  // DFS with batched queries per depth level
-  const stack: [string[], number][] = [[[entityId], 0]];
+  const stack: [string[], number][] = [[seeds, 0]];
 
   while (stack.length > 0 && allTriples.size < limit) {
     const [ids, d] = stack.pop()!;

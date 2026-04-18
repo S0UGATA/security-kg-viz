@@ -95,10 +95,14 @@ export function buildGraph(triples: Triple[], centerEntity?: string): GraphData 
     links.push({ source: subject, target: object, label: predicate, color: predicateColor(predicate) });
   }
 
-  if (centerEntity && nodeMap.has(centerEntity)) {
-    const node = nodeMap.get(centerEntity)!;
-    node.val = Math.max(node.val, 12);
-    node.isCenter = true;
+  if (centerEntity) {
+    const centerLower = centerEntity.toLowerCase();
+    const node = nodeMap.get(centerEntity)
+      ?? Array.from(nodeMap.values()).find((n) => n.id.toLowerCase() === centerLower);
+    if (node) {
+      node.val = Math.max(node.val, 12);
+      node.isCenter = true;
+    }
   }
 
   return { nodes: Array.from(nodeMap.values()), links };
