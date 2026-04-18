@@ -21,6 +21,8 @@ export function EntityExplorer() {
   tripleLimitRef.current = tripleLimit;
   const traversalRef = useRef(traversal);
   traversalRef.current = traversal;
+  const searchedEntityRef = useRef(searchedEntity);
+  searchedEntityRef.current = searchedEntity;
 
   const handleSearch = useCallback(async (entityId: string) => {
     setLoading(true);
@@ -45,12 +47,8 @@ export function EntityExplorer() {
   }, []);
 
   useEffect(() => {
-    handleSearch('T1059');
-  }, [handleSearch]);
-
-  useEffect(() => {
-    if (searchedEntity) handleSearch(searchedEntity);
-  }, [tripleLimit, traversal, handleSearch, searchedEntity]);
+    if (searchedEntityRef.current) handleSearch(searchedEntityRef.current);
+  }, [tripleLimit, traversal, handleSearch]);
 
   const handleNodeClick = useCallback((nodeId: string) => {
     handleSearch(nodeId);
