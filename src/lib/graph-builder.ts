@@ -65,6 +65,7 @@ export function buildGraph(triples: Triple[], centerEntity?: string): GraphData 
   }
 
   const nodeMap = new Map<string, GraphNode>();
+  const literalCanonical = new Map<string, string>();
   const links: GraphLink[] = [];
 
   function resolveSource(id: string, objectType?: ObjectType): string {
@@ -73,11 +74,22 @@ export function buildGraph(triples: Triple[], centerEntity?: string): GraphData 
     return detectSource(id);
   }
 
-  function ensureNode(id: string, objectType?: ObjectType): void {
+  function ensureNode(id: string, objectType?: ObjectType): string {
+    if (objectType && objectType !== 'id') {
+      const lower = id.toLowerCase();
+      const canonical = literalCanonical.get(lower);
+      if (canonical) {
+        const existing = nodeMap.get(canonical)!;
+        existing.val = Math.min(existing.val + 1, 17);
+        return canonical;
+      }
+      literalCanonical.set(lower, id);
+    }
+
     const existing = nodeMap.get(id);
     if (existing) {
       existing.val = Math.min(existing.val + 1, 17);
-      return;
+      return id;
     }
     const source = resolveSource(id, objectType);
     nodeMap.set(id, {
@@ -87,12 +99,13 @@ export function buildGraph(triples: Triple[], centerEntity?: string): GraphData 
       source,
       val: 3,
     });
+    return id;
   }
 
   for (const { subject, predicate, object, object_type } of triples) {
     ensureNode(subject);
-    ensureNode(object, object_type);
-    links.push({ source: subject, target: object, label: predicate, color: predicateColor(predicate) });
+    const objectId = ensureNode(object, object_type);
+    links.push({ source: subject, target: objectId, label: predicate, color: predicateColor(predicate) });
   }
 
   if (centerEntity) {
