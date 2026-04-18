@@ -76,7 +76,7 @@ export function App() {
       </header>
       <main className="app-content" role="tabpanel" id={`panel-${activeTab}`}>
         {activeTab === 'dashboard' && <Dashboard key={`dash-${sourceKey}`} />}
-        {activeTab === 'sources' && <SourceMap />}
+        {activeTab === 'sources' && <SourceMap key={`src-${sourceKey}`} />}
         {activeTab === 'explorer' && <EntityExplorer key={`exp-${sourceKey}`} />}
         {activeTab === 'sql' && <SqlConsole key={`sql-${sourceKey}`} />}
         {activeTab === 'about' && <About />}

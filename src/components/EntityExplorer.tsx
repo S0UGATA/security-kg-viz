@@ -44,13 +44,15 @@ export function EntityExplorer() {
     }
   }, []);
 
-  useEffect(() => {
-    handleSearch('T1059');
-  }, [handleSearch]);
-
+  // Re-fetch when traversal options change (or on initial mount with the
+  // default searchedEntity). We intentionally exclude `searchedEntity` from
+  // the dependency list so that handleSearch — which itself updates
+  // searchedEntity — does not re-trigger this effect and cause a duplicate
+  // query on every node click / new search.
   useEffect(() => {
     if (searchedEntity) handleSearch(searchedEntity);
-  }, [tripleLimit, traversal, handleSearch, searchedEntity]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripleLimit, traversal, handleSearch]);
 
   const handleNodeClick = useCallback((nodeId: string) => {
     handleSearch(nodeId);
