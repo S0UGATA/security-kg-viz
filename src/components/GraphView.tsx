@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import ForceGraph3D, { type ForceGraph3DInstance } from '3d-force-graph';
 import type { GraphData, GraphNode } from '../lib/graph-builder';
 import * as THREE from 'three';
@@ -56,29 +56,88 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
   const labelModeRef = useRef(labelMode);
   labelModeRef.current = labelMode;
 
+  const sharedSpheresRef = useRef(new Map<number, THREE.SphereGeometry>());
+  const sharedBoxesRef = useRef(new Map<number, RoundedBoxGeometry>());
+  const sharedMaterialsRef = useRef(new Map<string, THREE.MeshPhongMaterial>());
+  const disposablesRef = useRef<(THREE.BufferGeometry | THREE.Material | THREE.Texture)[]>([]);
+  const nodeLabelSpritesRef = useRef(new Map<string, THREE.Sprite>());
+  const pairCountRef = useRef(new Map<string, number>());
+  const lightsRef = useRef<{ ambient: THREE.AmbientLight; point: THREE.PointLight } | null>(null);
+  const labelRafRef = useRef(0);
+  const resizeRafRef = useRef(0);
+  const roRef = useRef<ResizeObserver | null>(null);
+  const centerGlowRef = useRef<THREE.MeshBasicMaterial[]>([]);
+
+  const cleanupAll = useCallback(() => {
+    cancelAnimationFrame(labelRafRef.current);
+    labelRafRef.current = 0;
+    cancelAnimationFrame(resizeRafRef.current);
+    resizeRafRef.current = 0;
+    if (roRef.current) {
+      roRef.current.disconnect();
+      roRef.current = null;
+    }
+    if (lightsRef.current) {
+      if (graphRef.current) {
+        const scene = graphRef.current.scene();
+        scene.remove(lightsRef.current.ambient);
+        scene.remove(lightsRef.current.point);
+      }
+      lightsRef.current.ambient.dispose();
+      lightsRef.current.point.dispose();
+      lightsRef.current = null;
+    }
+    disposablesRef.current.forEach((d) => d.dispose());
+    disposablesRef.current = [];
+    sharedSpheresRef.current.forEach((g) => g.dispose());
+    sharedSpheresRef.current.clear();
+    sharedBoxesRef.current.forEach((g) => g.dispose());
+    sharedBoxesRef.current.clear();
+    sharedMaterialsRef.current.forEach((m) => m.dispose());
+    sharedMaterialsRef.current.clear();
+    nodeLabelSpritesRef.current.clear();
+    centerGlowRef.current = [];
+    if (graphRef.current) {
+      try { graphRef.current._destructor(); } catch { /* already disposed */ }
+      graphRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => cleanupAll(), [cleanupAll]);
+
   useEffect(() => {
     if (!containerRef.current) return;
 
-    function destroyGraph() {
-      if (graphRef.current) {
-        try { graphRef.current._destructor(); } catch { /* already disposed */ }
-        graphRef.current = null;
-      }
-    }
-
     if (!data || data.nodes.length === 0) {
-      destroyGraph();
+      cleanupAll();
       return;
     }
 
-    destroyGraph();
+    cleanupAll();
 
     const n = data.nodes.length;
-    const disposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
+    const sharedSpheres = sharedSpheresRef.current;
+    const sharedBoxes = sharedBoxesRef.current;
+    const sharedMaterials = sharedMaterialsRef.current;
+    const disposables = disposablesRef.current;
+    const nodeLabelSprites = nodeLabelSpritesRef.current;
+    const pairCount = pairCountRef.current;
 
-    // --- Geometry pools ---
-    const sharedSpheres = new Map<number, THREE.SphereGeometry>();
-    const sharedBoxes = new Map<number, RoundedBoxGeometry>();
+    pairCount.clear();
+    for (const link of data.links) {
+      const key = [link.source, link.target].sort().join('\t');
+      pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
+    }
+
+    const linkRotations = new Map<object, number>();
+    const rotCounters = new Map<string, number>();
+    for (const link of data.links) {
+      const key = [link.source, link.target].sort().join('\t');
+      if ((pairCount.get(key) ?? 1) <= 1) continue;
+      const idx = rotCounters.get(key) ?? 0;
+      rotCounters.set(key, idx + 1);
+      linkRotations.set(link, idx * (Math.PI / 3));
+    }
 
     function getSphereGeometry(radius: number): THREE.SphereGeometry {
       const key = Math.round(radius * 100);
@@ -100,9 +159,6 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
       return geom;
     }
 
-    // --- Material pool ---
-    const sharedMaterials = new Map<string, THREE.MeshPhongMaterial>();
-
     function getNodeMaterial(color: string): THREE.MeshPhongMaterial {
       let mat = sharedMaterials.get(color);
       if (!mat) {
@@ -119,16 +175,6 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
       }
       return mat;
     }
-
-    // --- Multi-edge tracking for curvature + rotation ---
-    const pairCount = new Map<string, number>();
-    const pairIndex = new Map<string, number>();
-    for (const link of data.links) {
-      const key = [link.source, link.target].sort().join('\t');
-      pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
-    }
-
-    const nodeLabels: { node: GraphNode; sprite: THREE.Sprite }[] = [];
 
     const graph = new ForceGraph3D(containerRef.current)
       .backgroundColor('#0000')
@@ -157,6 +203,7 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
           disposables.push(centerMat);
           group.add(new THREE.Mesh(geometry, centerMat));
 
+          const glowMats: THREE.MeshBasicMaterial[] = [];
           for (const [scale, opacity] of [[1.5, 0.18], [2.0, 0.1], [2.8, 0.05]] as const) {
             const glowGeom = getSphereGeometry(radius * scale);
             const glowMat = new THREE.MeshBasicMaterial({
@@ -166,8 +213,10 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
               depthWrite: false,
             });
             disposables.push(glowMat);
+            glowMats.push(glowMat);
             group.add(new THREE.Mesh(glowGeom, glowMat));
           }
+          centerGlowRef.current = glowMats;
         } else {
           group.add(new THREE.Mesh(geometry, getNodeMaterial(node.color)));
         }
@@ -185,7 +234,9 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
         label.position.y = radius + (node.isCenter ? 4 : 3);
         group.add(label);
 
-        if (!node.isCenter) nodeLabels.push({ node, sprite: label });
+        if (!node.isCenter) {
+          nodeLabelSprites.set(node.id, label);
+        }
 
         return group;
       })
@@ -199,13 +250,7 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
         const key = [link.source?.id ?? link.source, link.target?.id ?? link.target].sort().join('\t');
         return (pairCount.get(key) ?? 1) > 1 ? 0.2 : 0;
       })
-      .linkCurveRotation((link: Any) => {
-        const key = [link.source?.id ?? link.source, link.target?.id ?? link.target].sort().join('\t');
-        if ((pairCount.get(key) ?? 1) <= 1) return 0;
-        const idx = pairIndex.get(key) ?? 0;
-        pairIndex.set(key, idx + 1);
-        return idx * (Math.PI / 3);
-      })
+      .linkCurveRotation((link: Any) => linkRotations.get(link) ?? 0)
       .linkDirectionalArrowLength(3.5)
       .linkDirectionalArrowRelPos(0.5)
       .linkDirectionalArrowColor('color')
@@ -230,6 +275,7 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
     pointLight.position.set(200, 200, 200);
     scene.add(ambientLight);
     scene.add(pointLight);
+    lightsRef.current = { ambient: ambientLight, point: pointLight };
 
     // --- Adaptive forces ---
     const sqrtN = Math.sqrt(n);
@@ -240,58 +286,73 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
     const distance = 80 + sqrtN * 22;
     graph.cameraPosition({ x: 0, y: 0, z: distance });
 
-    // --- Label visibility loop ---
+    // --- Animation loop: label visibility + glow pulse ---
     const _camDir = new THREE.Vector3();
     const _nodePos = new THREE.Vector3();
-    let depthBuf = new Float64Array(0);
-    let labelRaf = 0;
+    const _depthSprites: THREE.Sprite[] = [];
+    const _depthValues: number[] = [];
 
-    function updateLabels() {
-      labelRaf = requestAnimationFrame(updateLabels);
-      if (nodeLabels.length === 0) return;
+    function updateLoop() {
+      labelRafRef.current = requestAnimationFrame(updateLoop);
+
+      const glowMats = centerGlowRef.current;
+      if (glowMats.length > 0) {
+        const pulse = Math.sin(performance.now() * 0.003) * 0.5 + 0.5;
+        const base = [0.18, 0.10, 0.05];
+        for (let i = 0; i < glowMats.length; i++) {
+          glowMats[i].opacity = base[i] * (0.4 + 1.2 * pulse);
+        }
+      }
+
+      const sprites = nodeLabelSpritesRef.current;
+      if (sprites.size === 0) return;
 
       const mode = labelModeRef.current;
-
       if (mode === 'none') {
-        for (const { sprite } of nodeLabels) sprite.visible = false;
+        for (const s of sprites.values()) s.visible = false;
         return;
       }
-
       if (mode === 'all') {
-        for (const { sprite } of nodeLabels) sprite.visible = true;
+        for (const s of sprites.values()) s.visible = true;
         return;
       }
 
-      graph.camera().getWorldDirection(_camDir);
+      const g = graphRef.current;
+      if (!g) return;
+      g.camera().getWorldDirection(_camDir);
 
+      const currentNodes = g.graphData().nodes as GraphNode[];
       let minD = Infinity;
       let maxD = -Infinity;
-      const len = nodeLabels.length;
-      if (depthBuf.length < len) depthBuf = new Float64Array(len);
-      for (let i = 0; i < len; i++) {
-        const nd = nodeLabels[i].node;
-        if (nd.x == null) { depthBuf[i] = 0; continue; }
+      _depthSprites.length = 0;
+      _depthValues.length = 0;
+
+      for (const nd of currentNodes) {
+        if (nd.isCenter) continue;
+        const sprite = sprites.get(nd.id);
+        if (!sprite) continue;
+        if (nd.x == null) { sprite.visible = true; continue; }
         _nodePos.set(nd.x!, nd.y!, nd.z!);
         const d = _nodePos.dot(_camDir);
-        depthBuf[i] = d;
         if (d < minD) minD = d;
         if (d > maxD) maxD = d;
+        _depthSprites.push(sprite);
+        _depthValues.push(d);
       }
 
       const range = maxD - minD;
       const mid = (minD + maxD) / 2;
       const band = range * 0.2;
 
-      for (let i = 0; i < len; i++) {
-        nodeLabels[i].sprite.visible = range < 0.01 || Math.abs(depthBuf[i] - mid) <= band;
+      for (let i = 0; i < _depthSprites.length; i++) {
+        _depthSprites[i].visible = range < 0.01 || Math.abs(_depthValues[i] - mid) <= band;
       }
     }
-    updateLabels();
+    updateLoop();
 
-    let resizeRaf = 0;
     const ro = new ResizeObserver(() => {
-      cancelAnimationFrame(resizeRaf);
-      resizeRaf = requestAnimationFrame(() => {
+      cancelAnimationFrame(resizeRafRef.current);
+      resizeRafRef.current = requestAnimationFrame(() => {
         if (containerRef.current) {
           const { width, height } = containerRef.current.getBoundingClientRect();
           graph.width(width).height(height);
@@ -299,27 +360,10 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
       });
     });
     ro.observe(containerRef.current);
+    roRef.current = ro;
 
     graphRef.current = graph;
-
-    return () => {
-      cancelAnimationFrame(labelRaf);
-      cancelAnimationFrame(resizeRaf);
-      ro.disconnect();
-      scene.remove(ambientLight);
-      scene.remove(pointLight);
-      ambientLight.dispose();
-      pointLight.dispose();
-      disposables.forEach((d) => d.dispose());
-      sharedSpheres.forEach((g) => g.dispose());
-      sharedSpheres.clear();
-      sharedBoxes.forEach((g) => g.dispose());
-      sharedBoxes.clear();
-      sharedMaterials.forEach((m) => m.dispose());
-      sharedMaterials.clear();
-      destroyGraph();
-    };
-  }, [data]);
+  }, [data, cleanupAll]);
 
   return (
     <div

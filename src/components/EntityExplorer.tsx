@@ -14,8 +14,10 @@ export function EntityExplorer() {
   const [searchedEntity, setSearchedEntity] = useState<string | null>('T1059');
   const [copied, setCopied] = useState(false);
   const [tripleLimit, setTripleLimit] = useState(500);
+  const [tripleLimitDraft, setTripleLimitDraft] = useState(500);
   const [traversal, setTraversal] = useState<TraversalMode>('bfs');
   const [labelMode, setLabelMode] = useState<LabelMode>('auto');
+  const [complete, setComplete] = useState(false);
 
   const tripleLimitRef = useRef(tripleLimit);
   tripleLimitRef.current = tripleLimit;
@@ -27,26 +29,42 @@ export function EntityExplorer() {
   // since handleSearch itself updates searchedEntity).
   const searchedEntityRef = useRef(searchedEntity);
   searchedEntityRef.current = searchedEntity;
+  const searchGenRef = useRef(0);
+  const completeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  useEffect(() => () => clearTimeout(completeTimerRef.current), []);
 
   const handleSearch = useCallback(async (entityId: string) => {
+    const gen = ++searchGenRef.current;
+    clearTimeout(completeTimerRef.current);
     setLoading(true);
     setError(null);
+    setComplete(false);
+    setSearchedEntity(entityId);
+    setGraphData(null);
+    setTriples([]);
     try {
-      const results = await queryEntityMultiHop(entityId, 10, tripleLimitRef.current, traversalRef.current);
+      const results = await queryEntityMultiHop(
+        entityId, 10, tripleLimitRef.current, traversalRef.current,
+      );
+      if (searchGenRef.current !== gen) return;
       setTriples(results);
-      setSearchedEntity(entityId);
       if (results.length === 0) {
         setError(`No triples found for "${entityId}"`);
         setGraphData(null);
         return;
       }
-      const data = buildGraph(results, entityId);
-      setGraphData(data);
+      setGraphData(buildGraph(results, entityId));
+      setComplete(true);
+      completeTimerRef.current = setTimeout(() => {
+        if (searchGenRef.current === gen) setComplete(false);
+      }, 2000);
     } catch (e) {
+      if (searchGenRef.current !== gen) return;
       setError(e instanceof Error ? e.message : 'Query failed');
       setGraphData(null);
     } finally {
-      setLoading(false);
+      if (searchGenRef.current === gen) setLoading(false);
     }
   }, []);
 
@@ -94,8 +112,10 @@ export function EntityExplorer() {
               type="number"
               min={1}
               max={5000}
-              value={tripleLimit}
-              onChange={(e) => setTripleLimit(Math.max(1, Number(e.target.value) || 500))}
+              value={tripleLimitDraft}
+              onChange={(e) => setTripleLimitDraft(Math.max(1, Number(e.target.value) || 500))}
+              onBlur={() => setTripleLimit(tripleLimitDraft)}
+              onKeyDown={(e) => { if (e.key === 'Enter') setTripleLimit(tripleLimitDraft); }}
             />
           </label>
           <label className="limit-control">
@@ -142,6 +162,7 @@ export function EntityExplorer() {
               </span>
               {' '}&middot; {triples.length} triples &middot; {graphData.nodes.length} nodes &middot; {graphData.links.length} edges
               {triples.length >= tripleLimit && ` (limited to ${tripleLimit})`}
+              {complete && <span className="load-complete"> &#10003;</span>}
             </div>
             <div className="graph-legend">
               <h4>Sources</h4>

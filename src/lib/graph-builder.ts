@@ -175,9 +175,28 @@ export function buildSourceGraph(
 
   const nodeIds = new Set(nodes.map((n) => n.id));
 
-  const links: GraphLink[] = crossSourceLinks
-    .filter((l) => nodeIds.has(l.from) && nodeIds.has(l.to))
-    .map((l) => ({
+  const KNOWN_LINKS: CrossSourceLink[] = [
+    { from: 'attack/enterprise', to: 'attack', count: 1, predicate: 'subset_of' },
+    { from: 'attack/mobile', to: 'attack', count: 1, predicate: 'subset_of' },
+    { from: 'attack/ics', to: 'attack', count: 1, predicate: 'subset_of' },
+    { from: 'epss', to: 'cve', count: 1, predicate: 'scores' },
+    { from: 'kev', to: 'cve', count: 1, predicate: 'references' },
+    { from: 'vulnrichment', to: 'cve', count: 1, predicate: 'enriches' },
+  ];
+
+  const existingPairs = new Set(
+    crossSourceLinks.map((l) => `${l.from}\t${l.to}`),
+  );
+  const allLinks = [
+    ...crossSourceLinks.filter((l) => nodeIds.has(l.from) && nodeIds.has(l.to)),
+    ...KNOWN_LINKS.filter(
+      (l) => nodeIds.has(l.from) && nodeIds.has(l.to)
+        && !existingPairs.has(`${l.from}\t${l.to}`)
+        && !existingPairs.has(`${l.to}\t${l.from}`),
+    ),
+  ];
+
+  const links: GraphLink[] = allLinks.map((l) => ({
       source: l.from,
       target: l.to,
       label: l.predicate || '',

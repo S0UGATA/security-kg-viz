@@ -15,6 +15,9 @@ export const SOURCE_COLORS: Record<string, string> = {
   sigma: '#6495ed',
   vulnrichment: '#e0a458',
   misp_galaxy: '#c9b1ff',
+  'attack/enterprise': '#ff2d2d',
+  'attack/mobile': '#ff2d2d',
+  'attack/ics': '#ff2d2d',
   literal: '#708090',
 };
 
@@ -35,6 +38,9 @@ export const SOURCE_LABELS: Record<string, string> = {
   sigma: 'Sigma Rules',
   vulnrichment: 'CISA Vulnrichment',
   misp_galaxy: 'MISP Galaxy',
+  'attack/enterprise': 'ATT&CK Enterprise',
+  'attack/mobile': 'ATT&CK Mobile',
+  'attack/ics': 'ATT&CK ICS',
   literal: 'Literal Values',
 };
 

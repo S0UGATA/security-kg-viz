@@ -455,6 +455,17 @@ body {
   z-index: 10;
 }
 
+.load-complete {
+  color: #4caf50;
+  font-weight: bold;
+  animation: fadeInOut 2s ease-out forwards;
+}
+
+@keyframes fadeInOut {
+  0%, 60% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 .entity-label-copy {
   cursor: pointer;
   border-bottom: 1px dashed var(--text-secondary);
