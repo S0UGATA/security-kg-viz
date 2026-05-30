@@ -2,7 +2,7 @@ const LINKS = [
   {
     label: 'Security KG Dataset',
     url: 'https://huggingface.co/datasets/s0u9ata/security-kg',
-    description: 'The HuggingFace dataset with 18M+ security knowledge graph triples in Parquet format.',
+    description: 'The HuggingFace dataset with 26M+ security knowledge graph triples in Parquet format.',
   },
   {
     label: 'security-kg',
@@ -25,6 +25,7 @@ const SOURCES = [
   'D3FEND (Defensive Techniques)',
   'MITRE ATLAS (Adversarial AI/ML)',
   'MITRE Engage (Adversary Engagement)',
+  'MITRE F3 (Fight Financial Fraud)',
   'CAR (Cyber Analytics Repository)',
   'EPSS (Exploit Prediction Scoring)',
   'CISA KEV (Known Exploited Vulnerabilities)',
@@ -33,6 +34,13 @@ const SOURCES = [
   'ExploitDB (Public Exploits)',
   'Sigma Rules (Detection Rules)',
   'MISP Galaxy (Threat Intelligence)',
+  'Atomic Red Team (ATT&CK Emulation)',
+  'LOLBAS (Living Off The Land Binaries)',
+  'LOLDrivers (Vulnerable Drivers)',
+  'NIST 800-53 (Security Controls)',
+  'Nuclei Templates (Vulnerability Scans)',
+  'ENISA EUVD (EU Vulnerability Database)',
+  'OSV (Open Source Vulnerabilities)',
 ];
 
 export function About() {
@@ -40,8 +48,8 @@ export function About() {
     <div className="about">
       <h2>About</h2>
       <p>
-        An interactive browser-based explorer for a security knowledge graph containing 18M+
-        triples across 16 data sources. All queries run locally via DuckDB-WASM over remote
+        An interactive browser-based explorer for a security knowledge graph containing 26M+
+        triples across 24 data sources. All queries run locally via DuckDB-WASM over remote
         Parquet files — no backend required.
       </p>
 

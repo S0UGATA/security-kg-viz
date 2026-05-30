@@ -92,8 +92,12 @@ export function EntityExplorer() {
     if (!graphData) return [];
     const preds = new Map<string, string>();
     for (const link of graphData.links) {
-      if (link.label && !preds.has(link.label)) {
-        preds.set(link.label, link.color);
+      // Group by predicate (not full label with meta) so noisy predicates like
+      // rdf:type don't explode into one legend row per meta variant. Skip
+      // structural predicates that don't add semantic value.
+      if (!link.predicate || link.predicate === 'rdf:type') continue;
+      if (!preds.has(link.predicate)) {
+        preds.set(link.predicate, link.color);
       }
     }
     return Array.from(preds.entries())
@@ -149,17 +153,33 @@ export function EntityExplorer() {
         {graphData && searchedEntity && (
           <>
             <div className="triple-count">
-              <span
+              <button
+                type="button"
                 className="entity-label-copy"
                 title="Click to copy"
-                onClick={() => {
-                  navigator.clipboard.writeText(searchedEntity);
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1500);
+                onClick={async () => {
+                  try {
+                    if (navigator.clipboard?.writeText) {
+                      await navigator.clipboard.writeText(searchedEntity);
+                    } else {
+                      const ta = document.createElement('textarea');
+                      ta.value = searchedEntity;
+                      ta.style.position = 'fixed';
+                      ta.style.opacity = '0';
+                      document.body.appendChild(ta);
+                      ta.select();
+                      document.execCommand('copy');
+                      document.body.removeChild(ta);
+                    }
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1500);
+                  } catch {
+                    /* clipboard unavailable; ignore */
+                  }
                 }}
               >
                 {searchedEntity} {copied ? '(copied!)' : ''}
-              </span>
+              </button>
               {' '}&middot; {triples.length} triples &middot; {graphData.nodes.length} nodes &middot; {graphData.links.length} edges
               {triples.length >= tripleLimit && ` (limited to ${tripleLimit})`}
               {complete && <span className="load-complete"> &#10003;</span>}
@@ -170,7 +190,7 @@ export function EntityExplorer() {
                 <div key={source} className="legend-item">
                   <span
                     className="legend-dot"
-                    style={{ background: SOURCE_COLORS[source] || SOURCE_COLORS.unknown }}
+                    style={{ background: SOURCE_COLORS[source] || SOURCE_COLORS.literal }}
                   />
                   {SOURCE_LABELS[source] || source}
                 </div>

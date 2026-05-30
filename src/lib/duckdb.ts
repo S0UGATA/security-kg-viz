@@ -45,6 +45,13 @@ function sanitizeLimit(limit: number): number {
   return Math.min(n, 100000);
 }
 
+// DuckDB string-literal escape: double up single quotes. Used for every value
+// interpolated into SQL (URLs, IDs, etc.) since the WASM build doesn't expose
+// a parameterized prepare/bind API we use here.
+function escapeSql(s: string): string {
+  return s.replace(/'/g, "''");
+}
+
 async function initialize(): Promise<duckdb.AsyncDuckDBConnection> {
   setStatus('loading-wasm', 'Downloading DuckDB WebAssembly runtime...');
 
@@ -73,7 +80,7 @@ async function initialize(): Promise<duckdb.AsyncDuckDBConnection> {
   }
   await conn.query(`
     CREATE VIEW kg AS
-    SELECT * FROM parquet_scan('${currentParquetUrl}')
+    SELECT * FROM parquet_scan('${escapeSql(currentParquetUrl)}')
   `);
 
   setStatus('ready');
@@ -112,14 +119,14 @@ export async function setParquetUrl(url: string): Promise<void> {
       await conn.query('DROP VIEW IF EXISTS kg');
       await conn.query(`
         CREATE VIEW kg AS
-        SELECT * FROM parquet_scan('${url}')
+        SELECT * FROM parquet_scan('${escapeSql(url)}')
       `);
       currentParquetUrl = url;
       setStatus('ready');
     } catch (err) {
       await conn.query(`
         CREATE VIEW kg AS
-        SELECT * FROM parquet_scan('${currentParquetUrl}')
+        SELECT * FROM parquet_scan('${escapeSql(currentParquetUrl)}')
       `);
       setStatus('error', err instanceof Error ? err.message : 'Failed to switch data source');
       throw err;
@@ -135,17 +142,17 @@ export interface Triple {
   object: string;
   source: string;
   object_type: string;
+  meta: string;
 }
 
 export async function queryEntity(entityId: string, limit = 500): Promise<Triple[]> {
   const conn = await getConnection();
-  const escaped = entityId.replace(/'/g, "''");
+  const escaped = escapeSql(entityId);
   const safeLimit = sanitizeLimit(limit);
   const result = await conn.query(`
-    SELECT subject, predicate, object, source, object_type
+    SELECT subject, predicate, object, source, object_type, meta
     FROM kg
-    WHERE subject = '${escaped}' OR object = '${escaped}'
-       OR subject ILIKE '${escaped}' OR object ILIKE '${escaped}'
+    WHERE subject ILIKE '${escaped}' OR object ILIKE '${escaped}'
     LIMIT ${safeLimit}
   `);
   return result.toArray().map((row: Record<string, unknown>) => ({
@@ -154,6 +161,7 @@ export async function queryEntity(entityId: string, limit = 500): Promise<Triple
     object: String(row.object),
     source: String(row.source ?? ''),
     object_type: String(row.object_type ?? ''),
+    meta: String(row.meta ?? ''),
   }));
 }
 
@@ -161,7 +169,7 @@ export type TraversalMode = 'bfs' | 'dfs';
 
 async function resolveSeedEntities(entityId: string): Promise<string[]> {
   const conn = await getConnection();
-  const escaped = entityId.replace(/'/g, "''");
+  const escaped = escapeSql(entityId);
   const result = await conn.query(`
     SELECT DISTINCT id FROM (
       SELECT subject AS id FROM kg WHERE subject ILIKE '${escaped}'
@@ -175,10 +183,12 @@ async function resolveSeedEntities(entityId: string): Promise<string[]> {
 
 async function fetchNeighbors(entityIds: string[], limit: number): Promise<Triple[]> {
   const conn = await getConnection();
-  const escaped = entityIds.map((id) => `'${id.replace(/'/g, "''")}'`).join(',');
+  const escaped = entityIds.map((id) => `'${escapeSql(id)}'`).join(',');
   const safeLimit = sanitizeLimit(limit);
+  // DISTINCT skipped on purpose: callers dedup on the SPO key and DISTINCT
+  // would force DuckDB to hash all matching rows (expensive for hub entities).
   const result = await conn.query(`
-    SELECT DISTINCT subject, predicate, object, source, object_type
+    SELECT subject, predicate, object, source, object_type, meta
     FROM kg
     WHERE subject IN (${escaped}) OR object IN (${escaped})
     LIMIT ${safeLimit}
@@ -189,6 +199,7 @@ async function fetchNeighbors(entityIds: string[], limit: number): Promise<Tripl
     object: String(row.object),
     source: String(row.source ?? ''),
     object_type: String(row.object_type ?? ''),
+    meta: String(row.meta ?? ''),
   }));
 }
 
@@ -234,40 +245,30 @@ async function traverseDFS(
   const allTriples = new Map<string, Triple>();
   const visited = new Set<string>();
 
-  const stack: [string[], number][] = [[seeds, 0]];
+  // Single-entity stack so traversal is genuinely depth-first; mirrors BFS
+  // hop semantics (hops 0..depth-1 expand, depth stops).
+  const stack: { id: string; depth: number }[] = seeds.map((id) => ({ id, depth: 0 }));
 
   while (stack.length > 0 && allTriples.size < limit) {
-    const [ids, d] = stack.pop()!;
-    const unvisited = ids.filter((id) => !visited.has(id));
-    if (unvisited.length === 0 || d > depth) continue;
-    for (const id of unvisited) visited.add(id);
+    const { id, depth: d } = stack.pop()!;
+    if (visited.has(id) || d >= depth) continue;
+    visited.add(id);
 
-    const rows = await fetchNeighbors(unvisited, limit - allTriples.size);
-    const neighborsBySource = new Map<string, string[]>();
+    const rows = await fetchNeighbors([id], limit - allTriples.size);
+    const nextIds: string[] = [];
     for (const t of rows) {
       if (allTriples.size >= limit) break;
       const key = `${t.subject}\t${t.predicate}\t${t.object}`;
       if (!allTriples.has(key)) {
         allTriples.set(key, t);
-        for (const entity of [t.subject, t.object]) {
-          if (!visited.has(entity)) {
-            const srcKey = unvisited.includes(entity) ? '__self__' : entity;
-            if (srcKey !== '__self__') {
-              if (!neighborsBySource.has(srcKey)) neighborsBySource.set(srcKey, []);
-              neighborsBySource.get(srcKey)!.push(entity);
-            }
-          }
+        for (const e of [t.subject, t.object]) {
+          if (!visited.has(e)) nextIds.push(e);
         }
       }
     }
-    if (d < depth) {
-      const allNeighbors = new Set<string>();
-      for (const [, entities] of neighborsBySource) {
-        for (const e of entities) allNeighbors.add(e);
-      }
-      if (allNeighbors.size > 0) {
-        stack.push([Array.from(allNeighbors), d + 1]);
-      }
+    // Push reversed so the first neighbor is explored first (LIFO).
+    for (let i = nextIds.length - 1; i >= 0; i--) {
+      stack.push({ id: nextIds[i], depth: d + 1 });
     }
   }
 

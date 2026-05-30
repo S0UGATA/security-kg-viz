@@ -138,19 +138,21 @@ export function Dashboard() {
         merge({ bySource, crossSourceLinks });
         setPhase(2);
 
-        // Phase 3: top connected entities
+        // Phase 3: top connected entities — push filter into inner selects so
+        // DuckDB can skip noise rows before aggregating, and restrict the
+        // object side to id-typed rows so literals like "high" don't dominate.
         const topResult = await querySQL(`
-          SELECT entity, SUM(cnt) AS total FROM (
-            SELECT subject AS entity, COUNT(*) AS cnt FROM kg GROUP BY subject
+          WITH filtered AS (
+            SELECT subject AS entity FROM kg
+            WHERE subject IS NOT NULL AND length(trim(subject)) > 1
+              AND lower(trim(subject)) NOT IN ('no','none','n/a','na','-','--','null','unknown','other','true','false')
             UNION ALL
-            SELECT object AS entity, COUNT(*) AS cnt FROM kg GROUP BY object
+            SELECT object AS entity FROM kg
+            WHERE object_type = 'id' AND object IS NOT NULL AND length(trim(object)) > 1
+              AND lower(trim(object)) NOT IN ('no','none','n/a','na','-','--','null','unknown','other','true','false')
           )
-          WHERE entity IS NOT NULL
-            AND length(trim(entity)) > 1
-            AND lower(trim(entity)) NOT IN ('no', 'none', 'n/a', 'na', '-', '--', 'null', 'unknown', 'other', 'true', 'false')
-          GROUP BY entity
-          ORDER BY total DESC
-          LIMIT 15
+          SELECT entity, COUNT(*) AS total FROM filtered
+          GROUP BY entity ORDER BY total DESC LIMIT 15
         `);
         if (cancelled) return;
 

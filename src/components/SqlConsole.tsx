@@ -16,6 +16,16 @@ export function SqlConsole() {
       const trimmed = sql.trim();
       if (!trimmed) return;
 
+      // Defense in depth: the parquet view is read-only, but DuckDB-WASM
+      // still allows ATTACH/INSTALL/LOAD which can reach the network. Block
+      // those statements from the SQL console.
+      if (/\b(attach|detach|install|load|pragma|copy|export)\b/i.test(trimmed)) {
+        setError('Statements ATTACH, DETACH, INSTALL, LOAD, PRAGMA, COPY and EXPORT are disabled in the SQL console.');
+        setColumns([]);
+        setRows([]);
+        return;
+      }
+
       setLoading(true);
       setError(null);
       setQueryTime(null);

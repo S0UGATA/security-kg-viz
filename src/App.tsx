@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Dashboard } from './components/Dashboard';
 import { DataSourceSelector } from './components/DataSourceSelector';
 import { EntityExplorer } from './components/EntityExplorer';
@@ -14,6 +14,7 @@ export function App() {
   const [dbStatus, setDbStatus] = useState<DuckDBStatus>('idle');
   const [dbDetail, setDbDetail] = useState<string>();
   const [sourceKey, setSourceKey] = useState(0);
+  const tabButtonsRef = useRef<Array<HTMLButtonElement | null>>([]);
 
   useEffect(() => {
     return onStatusChange((status, detail) => {
@@ -42,9 +43,10 @@ export function App() {
           {tabs.map((tab, i) => (
             <button
               key={tab.id}
+              ref={(el) => { tabButtonsRef.current[i] = el; }}
               role="tab"
               aria-selected={activeTab === tab.id}
-              aria-controls={`panel-${tab.id}`}
+              aria-controls="app-tabpanel"
               tabIndex={activeTab === tab.id ? 0 : -1}
               className={activeTab === tab.id ? 'active' : ''}
               onClick={() => setActiveTab(tab.id)}
@@ -53,8 +55,9 @@ export function App() {
                   : e.key === 'ArrowLeft' ? (i - 1 + tabs.length) % tabs.length
                   : -1;
                 if (next >= 0) {
+                  e.preventDefault();
                   setActiveTab(tabs[next].id);
-                  (e.currentTarget.parentElement?.children[next] as HTMLElement)?.focus();
+                  tabButtonsRef.current[next]?.focus();
                 }
               }}
             >
@@ -74,7 +77,7 @@ export function App() {
           </span>
         </div>
       </header>
-      <main className="app-content" role="tabpanel" id={`panel-${activeTab}`}>
+      <main className="app-content" role="tabpanel" id="app-tabpanel" aria-labelledby={`tab-${activeTab}`}>
         {activeTab === 'dashboard' && <Dashboard key={`dash-${sourceKey}`} />}
         {activeTab === 'sources' && <SourceMap key={`src-${sourceKey}`} />}
         {activeTab === 'explorer' && <EntityExplorer key={`exp-${sourceKey}`} />}

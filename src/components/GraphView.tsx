@@ -61,7 +61,6 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
   const sharedMaterialsRef = useRef(new Map<string, THREE.MeshPhongMaterial>());
   const disposablesRef = useRef<(THREE.BufferGeometry | THREE.Material | THREE.Texture)[]>([]);
   const nodeLabelSpritesRef = useRef(new Map<string, THREE.Sprite>());
-  const pairCountRef = useRef(new Map<string, number>());
   const lightsRef = useRef<{ ambient: THREE.AmbientLight; point: THREE.PointLight } | null>(null);
   const labelRafRef = useRef(0);
   const resizeRafRef = useRef(0);
@@ -121,9 +120,8 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
     const sharedMaterials = sharedMaterialsRef.current;
     const disposables = disposablesRef.current;
     const nodeLabelSprites = nodeLabelSpritesRef.current;
-    const pairCount = pairCountRef.current;
+    const pairCount = new Map<string, number>();
 
-    pairCount.clear();
     for (const link of data.links) {
       const key = [link.source, link.target].sort().join('\t');
       pairCount.set(key, (pairCount.get(key) ?? 0) + 1);

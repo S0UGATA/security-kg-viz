@@ -29,6 +29,13 @@ export interface GraphLink {
   target: string;
   label: string;
   color: string;
+  predicate: string;
+  triplesSource: string;
+  meta: string;
+}
+
+function buildLinkLabel(predicate: string, triplesSource: string): string {
+  return triplesSource ? `${predicate} [${triplesSource}]` : predicate;
 }
 
 export interface GraphData {
@@ -102,10 +109,18 @@ export function buildGraph(triples: Triple[], centerEntity?: string): GraphData 
     return id;
   }
 
-  for (const { subject, predicate, object, object_type } of triples) {
+  for (const { subject, predicate, object, object_type, source, meta } of triples) {
     ensureNode(subject);
     const objectId = ensureNode(object, object_type);
-    links.push({ source: subject, target: objectId, label: predicate, color: predicateColor(predicate) });
+    links.push({
+      source: subject,
+      target: objectId,
+      label: buildLinkLabel(predicate, source),
+      color: predicateColor(predicate),
+      predicate,
+      triplesSource: source,
+      meta,
+    });
   }
 
   if (centerEntity) {
@@ -182,6 +197,17 @@ export function buildSourceGraph(
     { from: 'epss', to: 'cve', count: 1, predicate: 'scores' },
     { from: 'kev', to: 'cve', count: 1, predicate: 'references' },
     { from: 'vulnrichment', to: 'cve', count: 1, predicate: 'enriches' },
+    { from: 'atomic', to: 'attack', count: 1, predicate: 'tests-technique' },
+    { from: 'lolbas', to: 'attack', count: 1, predicate: 'maps-to-technique' },
+    { from: 'loldrivers', to: 'attack', count: 1, predicate: 'maps-to-technique' },
+    { from: 'nist_800_53', to: 'attack', count: 1, predicate: 'mitigates-technique' },
+    { from: 'nuclei', to: 'cve', count: 1, predicate: 'related-cve' },
+    { from: 'nuclei', to: 'cwe', count: 1, predicate: 'related-weakness' },
+    { from: 'euvd', to: 'cve', count: 1, predicate: 'related-cve' },
+    { from: 'osv', to: 'cve', count: 1, predicate: 'related-cve' },
+    { from: 'osv', to: 'ghsa', count: 1, predicate: 'aliased-by' },
+    { from: 'osv', to: 'cwe', count: 1, predicate: 'related-weakness' },
+    { from: 'f3', to: 'attack', count: 1, predicate: 'reuses-technique' },
   ];
 
   const existingPairs = new Set(
@@ -201,6 +227,9 @@ export function buildSourceGraph(
       target: l.to,
       label: l.predicate || '',
       color: l.predicate ? predicateColor(l.predicate) : '#6a6a8a',
+      predicate: l.predicate || '',
+      triplesSource: '',
+      meta: '',
     }));
 
   return { nodes, links };
