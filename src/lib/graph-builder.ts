@@ -31,7 +31,6 @@ export interface GraphLink {
   color: string;
   predicate: string;
   triplesSource: string;
-  meta: string;
 }
 
 function buildLinkLabel(predicate: string, triplesSource: string): string {
@@ -72,6 +71,10 @@ export function buildGraph(triples: Triple[], centerEntity?: string): GraphData 
   }
 
   const nodeMap = new Map<string, GraphNode>();
+  // Maps the SQL-computed canonical key back to the first-seen display id
+  // for literal nodes, so "HIGH"/"high"/"High" collapse to one node but the
+  // label keeps the first spelling we saw. The canonicalisation rule itself
+  // lives in the kg view (buildKgViewSql in duckdb.ts).
   const literalCanonical = new Map<string, string>();
   const links: GraphLink[] = [];
 
@@ -81,16 +84,16 @@ export function buildGraph(triples: Triple[], centerEntity?: string): GraphData 
     return detectSource(id);
   }
 
-  function ensureNode(id: string, objectType?: ObjectType): string {
+  function ensureNode(id: string, objectType?: ObjectType, canonicalKey?: string): string {
     if (objectType && objectType !== 'id') {
-      const lower = id.toLowerCase();
-      const canonical = literalCanonical.get(lower);
+      const key = canonicalKey ?? id.toLowerCase();
+      const canonical = literalCanonical.get(key);
       if (canonical) {
         const existing = nodeMap.get(canonical)!;
         existing.val = Math.min(existing.val + 1, 17);
         return canonical;
       }
-      literalCanonical.set(lower, id);
+      literalCanonical.set(key, id);
     }
 
     const existing = nodeMap.get(id);
@@ -109,9 +112,9 @@ export function buildGraph(triples: Triple[], centerEntity?: string): GraphData 
     return id;
   }
 
-  for (const { subject, predicate, object, object_type, source, meta } of triples) {
+  for (const { subject, predicate, object, object_type, object_canonical, source } of triples) {
     ensureNode(subject);
-    const objectId = ensureNode(object, object_type);
+    const objectId = ensureNode(object, object_type, object_canonical);
     links.push({
       source: subject,
       target: objectId,
@@ -119,7 +122,6 @@ export function buildGraph(triples: Triple[], centerEntity?: string): GraphData 
       color: predicateColor(predicate),
       predicate,
       triplesSource: source,
-      meta,
     });
   }
 
@@ -229,7 +231,6 @@ export function buildSourceGraph(
       color: l.predicate ? predicateColor(l.predicate) : '#6a6a8a',
       predicate: l.predicate || '',
       triplesSource: '',
-      meta: '',
     }));
 
   return { nodes, links };

@@ -1,9 +1,13 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { SearchBar } from './SearchBar';
-import { GraphView } from './GraphView';
-import { queryEntityMultiHop, type Triple, type TraversalMode } from '../lib/duckdb';
+import { GraphView, type GraphViewHandle } from './GraphView';
+import { GraphSettings } from './GraphSettings';
+import { ErrorBoundary } from './ErrorBoundary';
+import { TripleTable } from './TripleTable';
+import { type Triple, type TraversalMode } from '../lib/duckdb';
+import { q } from '../lib/queries';
 import { buildGraph, type GraphData } from '../lib/graph-builder';
-import type { LabelMode } from './GraphView';
+import { useViewOptions } from '../lib/viewOptions';
 import { SOURCE_COLORS, SOURCE_LABELS } from '../lib/constants';
 
 export function EntityExplorer() {
@@ -16,8 +20,10 @@ export function EntityExplorer() {
   const [tripleLimit, setTripleLimit] = useState(500);
   const [tripleLimitDraft, setTripleLimitDraft] = useState(500);
   const [traversal, setTraversal] = useState<TraversalMode>('bfs');
-  const [labelMode, setLabelMode] = useState<LabelMode>('auto');
+  const [viewOptions, updateViewOptions] = useViewOptions();
   const [complete, setComplete] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const graphRef = useRef<GraphViewHandle>(null);
 
   const tripleLimitRef = useRef(tripleLimit);
   tripleLimitRef.current = tripleLimit;
@@ -44,8 +50,10 @@ export function EntityExplorer() {
     setGraphData(null);
     setTriples([]);
     try {
-      const results = await queryEntityMultiHop(
-        entityId, 10, tripleLimitRef.current, traversalRef.current,
+      // Depth 3 covers ~all useful structure for hub entities at limit=500:
+      // hops 4-10 only burn round trips that never land in the triple budget.
+      const results = await q.entityNeighborhood(
+        entityId, 3, tripleLimitRef.current, traversalRef.current,
       );
       if (searchGenRef.current !== gen) return;
       setTriples(results);
@@ -129,14 +137,6 @@ export function EntityExplorer() {
               <option value="dfs">DFS</option>
             </select>
           </label>
-          <label className="limit-control">
-            <span>Labels</span>
-            <select value={labelMode} onChange={(e) => setLabelMode(e.target.value as LabelMode)}>
-              <option value="auto">Auto</option>
-              <option value="all">All</option>
-              <option value="none">None</option>
-            </select>
-          </label>
         </div>
       </div>
       {loading && <div className="loading">Querying knowledge graph...</div>}
@@ -149,7 +149,36 @@ export function EntityExplorer() {
             <p>Click a node to drill down. Drag nodes to rearrange. Scroll to zoom.</p>
           </div>
         )}
-        <GraphView data={graphData} onNodeClick={handleNodeClick} labelMode={labelMode} />
+        <ErrorBoundary
+          fallback={(err, reset) => (
+            <div className="graph-fallback">
+              <div className="error-message">
+                3D renderer crashed ({err.message}). Showing triples as a table.
+                {' '}<button type="button" onClick={reset}>Retry</button>
+              </div>
+              <TripleTable triples={triples} />
+            </div>
+          )}
+        >
+          <GraphView
+            ref={graphRef}
+            data={graphData}
+            onNodeClick={handleNodeClick}
+            viewOptions={viewOptions}
+          />
+        </ErrorBoundary>
+        {graphData && (
+          <GraphSettings
+            options={viewOptions}
+            onChange={updateViewOptions}
+            onFit={() => graphRef.current?.fit()}
+            onTogglePause={() => {
+              graphRef.current?.togglePause();
+              setPaused((p) => !p);
+            }}
+            paused={paused}
+          />
+        )}
         {graphData && searchedEntity && (
           <>
             <div className="triple-count">

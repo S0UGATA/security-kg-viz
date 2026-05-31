@@ -1,8 +1,13 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
 import ForceGraph3D, { type ForceGraph3DInstance } from '3d-force-graph';
-import type { GraphData, GraphNode } from '../lib/graph-builder';
+import type { GraphData, GraphNode, GraphLink } from '../lib/graph-builder';
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import type { ViewOptions, LabelMode } from '../lib/viewOptions';
+import { DEFAULT_VIEW_OPTIONS } from '../lib/viewOptions';
+
+// Re-export so callers don't have to know the type moved into viewOptions.ts.
+export type { LabelMode } from '../lib/viewOptions';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -40,21 +45,41 @@ function createTextSprite(text: string, opts: TextSpriteOpts): THREE.Sprite {
   return sprite;
 }
 
-export type LabelMode = 'auto' | 'all' | 'none';
+export interface GraphViewHandle {
+  fit: () => void;
+  togglePause: () => void;
+  isPaused: () => boolean;
+}
 
 interface GraphViewProps {
   data: GraphData | null;
   onNodeClick?: (nodeId: string) => void;
   labelMode?: LabelMode;
+  viewOptions?: ViewOptions;
 }
 
-export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewProps) {
+export const GraphView = forwardRef<GraphViewHandle, GraphViewProps>(function GraphView(
+  { data, onNodeClick, labelMode, viewOptions },
+  ref,
+) {
+  // viewOptions takes precedence; fall back to a minimal shape built from
+  // the legacy labelMode prop so older callers keep working.
+  const effectiveOptions: ViewOptions = viewOptions ?? {
+    ...DEFAULT_VIEW_OPTIONS,
+    labelMode: labelMode ?? DEFAULT_VIEW_OPTIONS.labelMode,
+  };
+
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<ForceGraph3DInstance | null>(null);
   const onNodeClickRef = useRef(onNodeClick);
   onNodeClickRef.current = onNodeClick;
-  const labelModeRef = useRef(labelMode);
-  labelModeRef.current = labelMode;
+  const labelModeRef = useRef<LabelMode>(effectiveOptions.labelMode);
+  labelModeRef.current = effectiveOptions.labelMode;
+
+  // Keep live options in a ref so the animation loop & accessor fns read
+  // the latest values without re-creating the ForceGraph instance.
+  const optionsRef = useRef(effectiveOptions);
+  optionsRef.current = effectiveOptions;
 
   const sharedSpheresRef = useRef(new Map<number, THREE.SphereGeometry>());
   const sharedBoxesRef = useRef(new Map<number, RoundedBoxGeometry>());
@@ -66,6 +91,25 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
   const resizeRafRef = useRef(0);
   const roRef = useRef<ResizeObserver | null>(null);
   const centerGlowRef = useRef<THREE.MeshBasicMaterial[]>([]);
+
+  // Hover-highlight: highlightId mutates on hover; accessors below read it.
+  const highlightIdRef = useRef<string | null>(null);
+
+  // Force multipliers' baselines, captured at graph build, so slider
+  // updates can scale them without rebuilding the instance.
+  const baseChargeRef = useRef(-40);
+  const baseLinkDistRef = useRef(15);
+
+  // Bloom post-processing pass (lazy-loaded). Tracked so we can remove on disable.
+  const bloomPassRef = useRef<unknown | null>(null);
+  const pausedRef = useRef(false);
+
+  // Auto-rotate state. Angle advances each frame when enabled; radius is
+  // captured from the initial camera distance so the orbit stays the size
+  // the auto-layout chose. lastTsRef gives us a frame delta.
+  const autoRotateAngleRef = useRef(0);
+  const autoRotateRadiusRef = useRef(150);
+  const autoRotateLastTsRef = useRef(0);
 
   const cleanupAll = useCallback(() => {
     cancelAnimationFrame(labelRafRef.current);
@@ -96,14 +140,38 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
     sharedMaterialsRef.current.clear();
     nodeLabelSpritesRef.current.clear();
     centerGlowRef.current = [];
+    highlightIdRef.current = null;
+    bloomPassRef.current = null;
+    pausedRef.current = false;
     if (graphRef.current) {
-      try { graphRef.current._destructor(); } catch { /* already disposed */ }
+      try { (graphRef.current as Any)._destructor(); } catch { /* already disposed */ }
       graphRef.current = null;
     }
   }, []);
 
   useEffect(() => () => cleanupAll(), [cleanupAll]);
 
+  // Imperative API consumed by the parent (Fit / Pause buttons in the panel).
+  useImperativeHandle(ref, () => ({
+    fit: () => {
+      graphRef.current?.zoomToFit(800, 50);
+    },
+    togglePause: () => {
+      const g = graphRef.current;
+      if (!g) return;
+      if (pausedRef.current) {
+        g.resumeAnimation();
+        pausedRef.current = false;
+      } else {
+        g.pauseAnimation();
+        pausedRef.current = true;
+      }
+    },
+    isPaused: () => pausedRef.current,
+  }), []);
+
+  // Rebuild the graph when data or layout-mode changes. Other view options
+  // are applied via the small effects below without re-creating the instance.
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -174,6 +242,16 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
       return mat;
     }
 
+    function isIncidentToHighlight(link: GraphLink): boolean {
+      const hid = highlightIdRef.current;
+      if (!hid) return true;
+      const s = typeof link.source === 'string'
+        ? link.source : (link.source as { id: string }).id;
+      const t = typeof link.target === 'string'
+        ? link.target : (link.target as { id: string }).id;
+      return s === hid || t === hid;
+    }
+
     const graph = new ForceGraph3D(containerRef.current)
       .backgroundColor('#0000')
       .graphData(data as Any)
@@ -242,10 +320,17 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
       .linkSource('source')
       .linkTarget('target')
       .linkColor('color')
-      .linkWidth(0.5)
       .linkOpacity(0.6)
+      .linkWidth((link: Any) => {
+        const opts = optionsRef.current;
+        if (!opts.highlightNeighbors || !highlightIdRef.current) return 0.5;
+        return isIncidentToHighlight(link as GraphLink) ? 1.6 : 0.2;
+      })
       .linkCurvature((link: Any) => {
-        const key = [link.source?.id ?? link.source, link.target?.id ?? link.target].sort().join('\t');
+        const key = [
+          link.source?.id ?? link.source,
+          link.target?.id ?? link.target,
+        ].sort().join('\t');
         return (pairCount.get(key) ?? 1) > 1 ? 0.2 : 0;
       })
       .linkCurveRotation((link: Any) => linkRotations.get(link) ?? 0)
@@ -253,6 +338,11 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
       .linkDirectionalArrowRelPos(0.5)
       .linkDirectionalArrowColor('color')
       .linkLabel('label')
+      // Particles: count read fresh from optionsRef every refresh().
+      .linkDirectionalParticles(() => (optionsRef.current.particles ? 2 : 0))
+      .linkDirectionalParticleSpeed(0.006)
+      .linkDirectionalParticleWidth(1.2)
+      .linkDirectionalParticleColor('color')
       .onNodeClick((_obj: Any) => {
         const node = _obj as GraphNode;
         onNodeClickRef.current?.(node.id);
@@ -261,10 +351,29 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
         if (containerRef.current) {
           containerRef.current.style.cursor = _obj ? 'pointer' : 'default';
         }
+        if (!optionsRef.current.highlightNeighbors) {
+          if (highlightIdRef.current !== null) {
+            highlightIdRef.current = null;
+            graphRef.current?.refresh();
+          }
+          return;
+        }
+        const next = _obj ? (_obj as GraphNode).id : null;
+        if (next !== highlightIdRef.current) {
+          highlightIdRef.current = next;
+          graphRef.current?.refresh();
+        }
       })
       .showNavInfo(false)
       .warmupTicks(Math.min(40 + n, 120))
       .cooldownTicks(Math.min(80 + n, 200));
+
+    // DAG layout (radial / top-down). Tolerate cycles by swallowing the error.
+    const layout = optionsRef.current.layout;
+    if (layout !== 'force') {
+      graph.dagMode(layout as Any);
+      graph.onDagError(() => undefined);
+    }
 
     // --- Lighting ---
     const scene = graph.scene();
@@ -275,14 +384,27 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
     scene.add(pointLight);
     lightsRef.current = { ambient: ambientLight, point: pointLight };
 
-    // --- Adaptive forces ---
+    // --- Adaptive forces (multiplied by user-tunable scalars) ---
     const sqrtN = Math.sqrt(n);
-    graph.d3Force('charge')?.strength(-40 - sqrtN * 4).distanceMax(120 + sqrtN * 20);
-    graph.d3Force('link')?.distance(15 + sqrtN * 2).strength(0.4);
-    graph.d3Force('center')?.strength(0.05);
+    const baseCharge = -40 - sqrtN * 4;
+    const baseLinkDist = 15 + sqrtN * 2;
+    baseChargeRef.current = baseCharge;
+    baseLinkDistRef.current = baseLinkDist;
+    const opts0 = optionsRef.current;
+    (graph.d3Force('charge') as Any)?.strength(baseCharge * opts0.chargeMul)
+      .distanceMax(120 + sqrtN * 20);
+    (graph.d3Force('link') as Any)?.distance(baseLinkDist * opts0.linkDistanceMul).strength(0.4);
+    (graph.d3Force('center') as Any)?.strength(0.05);
 
     const distance = 80 + sqrtN * 22;
     graph.cameraPosition({ x: 0, y: 0, z: distance });
+    autoRotateRadiusRef.current = distance;
+    autoRotateAngleRef.current = 0;
+    autoRotateLastTsRef.current = 0;
+
+    if (opts0.bloom) {
+      void enableBloom(graph, bloomPassRef);
+    }
 
     // --- Animation loop: label visibility + glow pulse ---
     const _camDir = new THREE.Vector3();
@@ -292,6 +414,27 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
 
     function updateLoop() {
       labelRafRef.current = requestAnimationFrame(updateLoop);
+
+      // Manual auto-orbit: TrackballControls (3d-force-graph default) has no
+      // built-in autoRotate, so we drive the camera around the Y axis here.
+      // We mutate camera.position directly to avoid kicking off the cameraPosition
+      // tween every frame.
+      if (optionsRef.current.autoRotate && graphRef.current) {
+        const now = performance.now();
+        const last = autoRotateLastTsRef.current || now;
+        const dt = Math.min(now - last, 100); // clamp tab-switch jumps
+        autoRotateLastTsRef.current = now;
+        autoRotateAngleRef.current += dt * 0.0004; // ~radians/ms -> ~13deg/sec
+
+        const cam = graphRef.current.camera();
+        // Preserve current radius (user may have zoomed) and tilt (y).
+        const r = Math.hypot(cam.position.x, cam.position.z) || autoRotateRadiusRef.current;
+        cam.position.x = r * Math.sin(autoRotateAngleRef.current);
+        cam.position.z = r * Math.cos(autoRotateAngleRef.current);
+        cam.lookAt(0, 0, 0);
+      } else {
+        autoRotateLastTsRef.current = 0;
+      }
 
       const glowMats = centerGlowRef.current;
       if (glowMats.length > 0) {
@@ -361,7 +504,48 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
     roRef.current = ro;
 
     graphRef.current = graph;
-  }, [data, cleanupAll]);
+    // The `layout` dep below intentionally rebuilds the graph when toggled
+    // because dagMode changes require a fresh simulation pass.
+  }, [data, cleanupAll, effectiveOptions.layout]);
+
+  // Live-apply view options that don't need a rebuild.
+  useEffect(() => {
+    // Re-seed the angle from the current camera position so toggling on
+    // doesn't snap the camera somewhere unexpected.
+    const g = graphRef.current;
+    if (!g) return;
+    if (effectiveOptions.autoRotate) {
+      const cam = g.camera();
+      autoRotateAngleRef.current = Math.atan2(cam.position.x, cam.position.z);
+      autoRotateLastTsRef.current = 0;
+    }
+  }, [effectiveOptions.autoRotate]);
+
+  useEffect(() => {
+    const g = graphRef.current;
+    if (!g) return;
+    (g.d3Force('charge') as Any)?.strength(baseChargeRef.current * effectiveOptions.chargeMul);
+    (g.d3Force('link') as Any)?.distance(baseLinkDistRef.current * effectiveOptions.linkDistanceMul);
+    g.d3ReheatSimulation();
+  }, [effectiveOptions.chargeMul, effectiveOptions.linkDistanceMul]);
+
+  // Particles + highlight changes don't need full rebuild — just refresh()
+  // so the accessor functions are re-evaluated.
+  useEffect(() => {
+    graphRef.current?.refresh();
+  }, [effectiveOptions.particles, effectiveOptions.highlightNeighbors]);
+
+  // Bloom: lazy-load on enable, remove on disable. The lazy import keeps
+  // the postprocessing modules out of the cold-start bundle.
+  useEffect(() => {
+    const g = graphRef.current;
+    if (!g) return;
+    if (effectiveOptions.bloom) {
+      void enableBloom(g, bloomPassRef);
+    } else {
+      disableBloom(g, bloomPassRef);
+    }
+  }, [effectiveOptions.bloom]);
 
   return (
     <div
@@ -369,4 +553,45 @@ export function GraphView({ data, onNodeClick, labelMode = 'auto' }: GraphViewPr
       style={{ width: '100%', height: '100%' }}
     />
   );
+});
+
+function applyAutoRotate(_graph: ForceGraph3DInstance, _on: boolean): void {
+  // Auto-rotate is driven manually inside the rAF loop in GraphView so we
+  // don't depend on the controls type (TrackballControls has no autoRotate).
+  // Kept as a no-op shim in case any external caller still references it.
+}
+
+async function enableBloom(
+  graph: ForceGraph3DInstance,
+  passRef: React.MutableRefObject<unknown | null>,
+): Promise<void> {
+  if (passRef.current) return;
+  const [{ UnrealBloomPass }, { OutputPass }] = await Promise.all([
+    import('three/addons/postprocessing/UnrealBloomPass.js'),
+    import('three/addons/postprocessing/OutputPass.js'),
+  ]);
+  const composer = graph.postProcessingComposer() as Any;
+  const renderer = composer.renderer as THREE.WebGLRenderer;
+  const w = renderer.domElement.clientWidth || 800;
+  const h = renderer.domElement.clientHeight || 600;
+  const pass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.8, 0.4, 0.85);
+  composer.addPass(pass);
+  // OutputPass keeps colors correct when bloom is the last pass.
+  const output = new OutputPass();
+  composer.addPass(output);
+  passRef.current = { bloom: pass, output };
+}
+
+function disableBloom(
+  graph: ForceGraph3DInstance,
+  passRef: React.MutableRefObject<unknown | null>,
+): void {
+  if (!passRef.current) return;
+  const composer = graph.postProcessingComposer() as Any;
+  const { bloom, output } = passRef.current as { bloom: Any; output: Any };
+  try { composer.removePass(bloom); } catch { /* ignore */ }
+  try { composer.removePass(output); } catch { /* ignore */ }
+  try { bloom.dispose?.(); } catch { /* ignore */ }
+  try { output.dispose?.(); } catch { /* ignore */ }
+  passRef.current = null;
 }

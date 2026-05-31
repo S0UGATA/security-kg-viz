@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useMemo } from 'react';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -11,8 +11,9 @@ import {
   Legend,
 } from 'chart.js';
 import { Bar, Doughnut } from 'react-chartjs-2';
-import { querySQL, getCurrentParquetUrl } from '../lib/duckdb';
-import { SOURCE_COLORS, SOURCE_LABELS, statsFileUrl } from '../lib/constants';
+import { q, fetchPrecomputedStats } from '../lib/queries';
+import { useQuery } from '../lib/useQuery';
+import { SOURCE_COLORS, SOURCE_LABELS } from '../lib/constants';
 
 
 ChartJS.register(CategoryScale, LinearScale, LogarithmicScale, BarElement, ArcElement, Title, Tooltip, Legend);
@@ -47,132 +48,41 @@ const chartOptions = {
 };
 
 export function Dashboard() {
-  const [stats, setStats] = useState<Stats>({});
-  const [error, setError] = useState<string | null>(null);
-  const [phase, setPhase] = useState(0); // 0=init, 1=basic, 2=sources, 3=done
+  // Try the pre-computed stats JSON first; on miss (null), fall back to four
+  // live queries in parallel. Each useQuery owns its own race-cancellation.
+  const precomputed = useQuery(fetchPrecomputedStats, []);
+  const useLive = !precomputed.loading && precomputed.data == null;
 
-  const merge = useCallback((patch: Partial<Stats>) => {
-    setStats((prev) => ({ ...prev, ...patch }));
-  }, []);
+  const summary = useQuery(q.summary, [], { enabled: useLive });
+  const topPreds = useQuery(() => q.topPredicates(25), [], { enabled: useLive });
+  const sources = useQuery(q.countBySource, [], { enabled: useLive });
+  const cross = useQuery(() => q.crossSourceLinks({ limit: 15 }), [], { enabled: useLive });
+  const topEntities = useQuery(() => q.topConnectedEntities(15), [], { enabled: useLive });
 
-  useEffect(() => {
-    let cancelled = false;
+  const stats = useMemo<Stats>(() => {
+    if (precomputed.data) return precomputed.data;
+    return {
+      totalTriples: summary.data?.totalTriples,
+      uniqueSubjects: summary.data?.uniqueSubjects,
+      uniqueObjects: summary.data?.uniqueObjects,
+      uniquePredicates: summary.data?.uniquePredicates,
+      topPredicates: topPreds.data ?? undefined,
+      bySource: sources.data ?? undefined,
+      crossSourceLinks: cross.data ?? undefined,
+      topConnectedEntities: topEntities.data ?? undefined,
+    };
+  }, [precomputed.data, summary.data, topPreds.data, sources.data, cross.data, topEntities.data]);
 
-    async function load() {
-      try {
-        // Try pre-computed stats JSON first
-        try {
-          const url = statsFileUrl(getCurrentParquetUrl());
-          const resp = await fetch(url);
-          if (resp.ok) {
-            const data = await resp.json();
-            if (!cancelled && typeof data.totalTriples === 'number') {
-              setStats(data);
-              setPhase(3);
-              return;
-            }
-          }
-        } catch {
-          // Fall through to live queries
-        }
-        if (cancelled) return;
-
-        // Phase 1: fast — total + predicates (simple aggregations)
-        const [totalResult, predicateResult] = await Promise.all([
-          querySQL(`
-            SELECT COUNT(*) AS total,
-                   COUNT(DISTINCT subject) AS subjects,
-                   COUNT(DISTINCT object) AS objects,
-                   COUNT(DISTINCT predicate) AS predicates
-            FROM kg
-          `),
-          querySQL(
-            'SELECT predicate, COUNT(*) AS cnt FROM kg GROUP BY predicate ORDER BY cnt DESC LIMIT 25',
-          ),
-        ]);
-        if (cancelled) return;
-
-        merge({
-          totalTriples: Number(totalResult.rows[0]?.[0] ?? 0),
-          uniqueSubjects: Number(totalResult.rows[0]?.[1] ?? 0),
-          uniqueObjects: Number(totalResult.rows[0]?.[2] ?? 0),
-          uniquePredicates: Number(totalResult.rows[0]?.[3] ?? 0),
-          topPredicates: predicateResult.rows.map((row) => ({
-            predicate: String(row[0]),
-            count: Number(row[1]),
-          })),
-        });
-        setPhase(1);
-
-        // Phase 2: source distribution + cross-source links
-        const sourceDistResult = await querySQL(
-          `SELECT source, COUNT(*) AS cnt FROM kg GROUP BY source ORDER BY cnt DESC`,
-        );
-        if (cancelled) return;
-
-        const bySource: Stats['bySource'] = sourceDistResult.rows.map((row) => ({
-          source: String(row[0]),
-          count: Number(row[1]),
-        }));
-
-        const crossResult = await querySQL(`
-          WITH entity_source AS (
-            SELECT DISTINCT subject, source FROM kg
-          )
-          SELECT k.source AS src, es.source AS dst, COUNT(*) AS cnt
-          FROM kg k
-          JOIN entity_source es ON k.object = es.subject
-          WHERE k.object_type = 'id' AND k.source != es.source
-          GROUP BY k.source, es.source
-          ORDER BY cnt DESC
-          LIMIT 15
-        `);
-        if (cancelled) return;
-
-        const crossSourceLinks: Stats['crossSourceLinks'] = crossResult.rows.map((row) => ({
-          from: String(row[0]),
-          to: String(row[1]),
-          count: Number(row[2]),
-        }));
-
-        merge({ bySource, crossSourceLinks });
-        setPhase(2);
-
-        // Phase 3: top connected entities — push filter into inner selects so
-        // DuckDB can skip noise rows before aggregating, and restrict the
-        // object side to id-typed rows so literals like "high" don't dominate.
-        const topResult = await querySQL(`
-          WITH filtered AS (
-            SELECT subject AS entity FROM kg
-            WHERE subject IS NOT NULL AND length(trim(subject)) > 1
-              AND lower(trim(subject)) NOT IN ('no','none','n/a','na','-','--','null','unknown','other','true','false')
-            UNION ALL
-            SELECT object AS entity FROM kg
-            WHERE object_type = 'id' AND object IS NOT NULL AND length(trim(object)) > 1
-              AND lower(trim(object)) NOT IN ('no','none','n/a','na','-','--','null','unknown','other','true','false')
-          )
-          SELECT entity, COUNT(*) AS total FROM filtered
-          GROUP BY entity ORDER BY total DESC LIMIT 15
-        `);
-        if (cancelled) return;
-
-        merge({
-          topConnectedEntities: topResult.rows.map((row) => ({
-            entity: String(row[0]),
-            count: Number(row[1]),
-          })),
-        });
-        setPhase(3);
-      } catch (e) {
-        if (!cancelled) {
-          setError(e instanceof Error ? e.message : 'Failed to load stats');
-        }
-      }
-    }
-
-    load();
-    return () => { cancelled = true; };
-  }, [merge]);
+  const error =
+    precomputed.error ?? summary.error ?? topPreds.error
+      ?? sources.error ?? cross.error ?? topEntities.error;
+  const stillLoading = precomputed.loading
+    || (useLive && summary.loading && stats.totalTriples == null);
+  const phase3Done = precomputed.data != null
+    || (!useLive ? false
+        : !summary.loading && !topPreds.loading && !sources.loading
+          && !cross.loading && !topEntities.loading);
+  const phase = stillLoading ? 0 : (phase3Done ? 3 : 1);
 
   if (error) {
     return (

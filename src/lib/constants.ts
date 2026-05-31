@@ -112,8 +112,31 @@ const HF_BASE = `${HF_REPO}/data`;
 
 export const PARQUET_URL = `${HF_BASE}/combined.parquet`;
 
+// Sentinel for the partitioned mode: a single `kg` view built via
+// read_parquet() over every per-source file. DuckDB can prune entire files
+// when queries filter by `source`. Slower than combined.parquet for
+// full-scan queries (more HTTP range requests), and skips the dedup that
+// combined.parquet applies, so duplicates may appear across sources.
+export const PARTITIONED_FILE_TOKEN = '__partitioned__';
+
+// Per-source parquet files used when PARTITIONED_FILE_TOKEN is selected.
+// Excludes the aggregate files (combined, attack-all) so each row is
+// attributed to exactly one source.
+const PARTITIONED_FILES = [
+  'enterprise.parquet', 'mobile.parquet', 'ics.parquet',
+  'atlas.parquet', 'engage.parquet', 'f3.parquet',
+  'capec.parquet', 'car.parquet', 'cpe.parquet', 'cve.parquet', 'cwe.parquet',
+  'd3fend.parquet', 'epss.parquet', 'euvd.parquet', 'exploitdb.parquet',
+  'ghsa.parquet', 'kev.parquet', 'vulnrichment.parquet', 'sigma.parquet',
+  'misp_galaxy.parquet', 'atomic.parquet', 'lolbas.parquet', 'loldrivers.parquet',
+  'nist_800_53.parquet', 'nuclei.parquet', 'osv.parquet',
+];
+export const PARTITIONED_PARQUET_URLS: string[] =
+  PARTITIONED_FILES.map((f) => `${HF_BASE}/${f}`);
+
 export const AVAILABLE_PARQUET_FILES = [
   { label: 'Combined (all sources)', file: 'combined.parquet' },
+  { label: 'Partitioned (per-source union, experimental)', file: PARTITIONED_FILE_TOKEN },
   { label: 'MITRE ATT&CK (all)', file: 'attack-all.parquet' },
   { label: '\u00A0\u00A0\u2514 ATT&CK Enterprise', file: 'enterprise.parquet' },
   { label: '\u00A0\u00A0\u2514 ATT&CK Mobile', file: 'mobile.parquet' },

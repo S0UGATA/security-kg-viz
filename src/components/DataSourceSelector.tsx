@@ -1,6 +1,12 @@
 import { useState } from 'react';
-import { AVAILABLE_PARQUET_FILES, parquetFileUrl, PARQUET_URL } from '../lib/constants';
-import { setParquetUrl, getCurrentParquetUrl } from '../lib/duckdb';
+import {
+  AVAILABLE_PARQUET_FILES,
+  parquetFileUrl,
+  PARQUET_URL,
+  PARTITIONED_FILE_TOKEN,
+  PARTITIONED_PARQUET_URLS,
+} from '../lib/constants';
+import { setParquetUrl, getCurrentParquetSource } from '../lib/duckdb';
 
 interface DataSourceSelectorProps {
   onSwitch?: () => void;
@@ -12,17 +18,29 @@ export function DataSourceSelector({ onSwitch }: DataSourceSelectorProps) {
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const currentUrl = getCurrentParquetUrl();
-  const currentFile = AVAILABLE_PARQUET_FILES.find(
-    (f) => parquetFileUrl(f.file) === currentUrl,
-  )?.file ?? '';
+  const currentSource = getCurrentParquetSource();
+  const isPartitioned = Array.isArray(currentSource);
+  const currentUrl = isPartitioned ? '' : currentSource;
+  const currentFile = isPartitioned
+    ? PARTITIONED_FILE_TOKEN
+    : (AVAILABLE_PARQUET_FILES.find((f) => parquetFileUrl(f.file) === currentUrl)?.file ?? '');
 
-  async function switchSource(url: string, onSuccess?: () => void) {
-    if (url === currentUrl) return;
+  // Resolve a selector `file` value to the source spec we hand to setParquetUrl.
+  // The sentinel maps to the partitioned URL list; everything else is a single URL.
+  function resolveSource(file: string): string | string[] {
+    return file === PARTITIONED_FILE_TOKEN ? PARTITIONED_PARQUET_URLS : parquetFileUrl(file);
+  }
+
+  async function switchSource(spec: string | string[], onSuccess?: () => void) {
+    // Compare against current source; skip no-op switches.
+    const same = Array.isArray(spec) && Array.isArray(currentSource)
+      ? spec.length === currentSource.length && spec.every((u, i) => u === currentSource[i])
+      : spec === currentSource;
+    if (same) return;
     setSwitching(true);
     setError(null);
     try {
-      await setParquetUrl(url);
+      await setParquetUrl(spec);
       onSwitch?.();
       onSuccess?.();
     } catch (e) {
@@ -38,7 +56,7 @@ export function DataSourceSelector({ onSwitch }: DataSourceSelectorProps) {
       <select
         id="parquet-select"
         value={currentFile}
-        onChange={(e) => switchSource(parquetFileUrl(e.target.value))}
+        onChange={(e) => switchSource(resolveSource(e.target.value))}
         disabled={switching}
       >
         {!currentFile && <option value="">Custom URL</option>}

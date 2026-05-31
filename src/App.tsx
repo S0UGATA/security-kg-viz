@@ -1,11 +1,22 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { Dashboard } from './components/Dashboard';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { DataSourceSelector } from './components/DataSourceSelector';
-import { EntityExplorer } from './components/EntityExplorer';
-import { SourceMap } from './components/SourceMap';
-import { SqlConsole } from './components/SqlConsole';
 import { About } from './components/About';
-import { onStatusChange, type DuckDBStatus } from './lib/duckdb';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { onStatusChange, getConnection, type DuckDBStatus } from './lib/duckdb';
+
+// Heavy tabs are loaded on demand so the cold-start bundle excludes Three.js,
+// 3d-force-graph, and Chart.js. About stays eager (it's tiny and always
+// reachable as a docs entry point). Each lazy() call becomes its own chunk;
+// the manualChunks config in vite.config.ts keeps the shared 3D / chart libs
+// in separate chunks that load alongside the first tab that needs them.
+const Dashboard = lazy(() => import('./components/Dashboard').then((m) => ({ default: m.Dashboard })));
+const SourceMap = lazy(() => import('./components/SourceMap').then((m) => ({ default: m.SourceMap })));
+const EntityExplorer = lazy(() => import('./components/EntityExplorer').then((m) => ({ default: m.EntityExplorer })));
+const SqlConsole = lazy(() => import('./components/SqlConsole').then((m) => ({ default: m.SqlConsole })));
+
+function TabLoading() {
+  return <div className="loading">Loading...</div>;
+}
 
 type Tab = 'dashboard' | 'sources' | 'explorer' | 'sql' | 'about';
 
@@ -21,6 +32,19 @@ export function App() {
       setDbStatus(status);
       setDbDetail(detail);
     });
+  }, []);
+
+  // Prewarm: start DuckDB-WASM download + parquet view creation as soon as
+  // the shell mounts, in parallel with the UI render and lazy tab chunk
+  // fetches. Without this, the first query in any tab serially waits for
+  // ~5MB of WASM + parquet metadata. Errors are swallowed because the same
+  // initialise path runs when the first real query lands and will surface
+  // the error then.
+  useEffect(() => {
+    getConnection().catch(() => { /* surfaced via onStatusChange */ });
+    // Also start fetching the default tab's chunk now (parallel with WASM
+    // download) so React.lazy doesn't add a serial render delay.
+    import('./components/EntityExplorer');
   }, []);
 
   const handleSourceSwitch = useCallback(() => {
@@ -78,10 +102,26 @@ export function App() {
         </div>
       </header>
       <main className="app-content" role="tabpanel" id="app-tabpanel" aria-labelledby={`tab-${activeTab}`}>
-        {activeTab === 'dashboard' && <Dashboard key={`dash-${sourceKey}`} />}
-        {activeTab === 'sources' && <SourceMap key={`src-${sourceKey}`} />}
-        {activeTab === 'explorer' && <EntityExplorer key={`exp-${sourceKey}`} />}
-        {activeTab === 'sql' && <SqlConsole key={`sql-${sourceKey}`} />}
+        {activeTab === 'dashboard' && (
+          <ErrorBoundary key={`dash-${sourceKey}`}>
+            <Suspense fallback={<TabLoading />}><Dashboard /></Suspense>
+          </ErrorBoundary>
+        )}
+        {activeTab === 'sources' && (
+          <ErrorBoundary key={`src-${sourceKey}`}>
+            <Suspense fallback={<TabLoading />}><SourceMap /></Suspense>
+          </ErrorBoundary>
+        )}
+        {activeTab === 'explorer' && (
+          <ErrorBoundary key={`exp-${sourceKey}`}>
+            <Suspense fallback={<TabLoading />}><EntityExplorer /></Suspense>
+          </ErrorBoundary>
+        )}
+        {activeTab === 'sql' && (
+          <ErrorBoundary key={`sql-${sourceKey}`}>
+            <Suspense fallback={<TabLoading />}><SqlConsole /></Suspense>
+          </ErrorBoundary>
+        )}
         {activeTab === 'about' && <About />}
       </main>
     </div>
